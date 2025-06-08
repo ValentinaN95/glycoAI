@@ -13,8 +13,17 @@ import pandas as pd
 from dataclasses import asdict
 import requests
 
-# Import your existing classes
-from apifunctions import DexcomAPI, GlucoseAnalyzer, DEMO_USERS, DemoUser
+from apifunctions import (
+    DexcomAPI,
+    GlucoseAnalyzer,
+    DEMO_USERS,
+    DemoUser,
+    format_glucose_data_for_display
+)
+
+# Initialize Mistral chat with your agent ID
+MISTRAL_API_KEY = "ZAjtPftvZrCxK7WWwjBJIYudaiNhwRuO"
+MISTRAL_AGENT_ID = "ag:2d7a33b1:20250608:glycoaiagent:cc72ded9"
 
 class GlucoBuddyMistralChat:
     """Simple chat interface using Mistral agents for glucose monitoring"""

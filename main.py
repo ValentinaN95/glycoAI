@@ -13,6 +13,21 @@ from typing import Optional, Tuple, List
 import asyncio
 import requests
 import logging
+from mistral_chat import GlucoBuddyMistralChat
+
+# Initialize Mistral chat with your agent ID
+MISTRAL_API_KEY = "your_mistral_api_key"
+MISTRAL_AGENT_ID = "ag:2d7a33b1:20250608:glycoaiagent:cc72ded9"
+
+# Initialize the chat interface
+mistral_chat = GlucoBuddyMistralChat(MISTRAL_API_KEY, MISTRAL_AGENT_ID)
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Global variable to store the loaded data
+loaded_data = None
 
 # Import our custom functions
 from apifunctions import (
