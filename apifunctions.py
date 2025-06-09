@@ -97,9 +97,9 @@ DEMO_USERS = {
 
 # Dexcom API Configuration
 SANDBOX_BASE_URL = "https://sandbox-api.dexcom.com"
-CLIENT_ID = "your_client_id_here"
-CLIENT_SECRET = "your_client_secret_here"
-REDIRECT_URI = "http://localhost:8080/callback"
+CLIENT_ID = "mLElKHKRwRDVUrAOPBzktFGY7qkTc7Zm"
+CLIENT_SECRET = "HmFpgyVweuwKrQpf"
+REDIRECT_URI = "http://localhost:7860/callback"
 
 class DexcomAPI:
     """Handles all Dexcom API interactions with proper OAuth flow"""

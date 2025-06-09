@@ -1,7 +1,6 @@
 """
-GycoAI - AI-Powered Glucose Insights
-Main Gradio application interface for demonstrating Dexcom API integration
-and AI-powered glucose pattern analysis with MistralMCPClient.
+GlycoAI - AI-Powered Glucose Insights
+Main Gradio application with prominent, centralized load data button
 """
 
 import gradio as gr
@@ -10,24 +9,20 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import pandas as pd
 from typing import Optional, Tuple, List
-import asyncio
-import requests
 import logging
-from mistral_chat import GlucoBuddyMistralChat
+import os
 
-# Initialize Mistral chat with your agent ID
-MISTRAL_API_KEY = "your_mistral_api_key"
-MISTRAL_AGENT_ID = "ag:2d7a33b1:20250608:glycoaiagent:cc72ded9"
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
-# Initialize the chat interface
-mistral_chat = GlucoBuddyMistralChat(MISTRAL_API_KEY, MISTRAL_AGENT_ID)
+# Import the Mistral chat class and unified data manager
+from mistral_chat import GlucoBuddyMistralChat, validate_environment
+from unified_data_manager import UnifiedDataManager
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Global variable to store the loaded data
-loaded_data = None
 
 # Import our custom functions
 from apifunctions import (
@@ -37,96 +32,111 @@ from apifunctions import (
     format_glucose_data_for_display
 )
 
-# Setup logging
-logger = logging.getLogger(__name__)
-
-
 class GlucoBuddyApp:
-    """Main application class for GlucoBuddy"""
+    """Main application class for GlucoBuddy with unified data management"""
 
     def __init__(self):
-        self.dexcom_api = DexcomAPI()
-        self.analyzer = GlucoseAnalyzer()
-        self.current_user = None
-        self.glucose_data = None
+        # Validate environment before initializing
+        if not validate_environment():
+            raise ValueError("Environment validation failed - check your .env file or environment variables")
+        
+        # Single data manager for consistency
+        self.data_manager = UnifiedDataManager()
+        
+        # Chat interface (will use data manager's context)
+        self.mistral_chat = GlucoBuddyMistralChat()
+        
+        # UI state
         self.chat_history = []
 
-    def select_demo_user(self, user_key: str) -> Tuple[str, str, str]:
-        """Handle demo user selection and simulate login"""
+    def select_demo_user(self, user_key: str) -> Tuple[str, str]:
+        """Handle demo user selection and load data consistently"""
         if user_key not in DEMO_USERS:
-            return gr.Info("❌ Invalid user selection"), "", ""
+            return "❌ Invalid user selection", gr.update(visible=False)
 
         try:
-            user = DEMO_USERS[user_key]
-            access_token = self.dexcom_api.simulate_demo_login(user_key)
-            self.current_user = user
-
-            # Initialize MCP client with user data
-            asyncio.create_task(self.mcp_client.load_user_data(user_key))
-
+            # Load data through unified manager
+            load_result = self.data_manager.load_user_data(user_key)
+            
+            if not load_result['success']:
+                return f"❌ {load_result['message']}", gr.update(visible=False)
+            
+            user = self.data_manager.current_user
+            
+            # Update Mistral chat with the same context
+            self._sync_chat_with_data_manager()
+            
+            # Clear chat history when switching users
             self.chat_history = []
-            gr.Info(f"✅ Successfully connected as {user.name}")
+            self.mistral_chat.clear_conversation()
 
-            return f"Connected: {user.name} ({user.device_type})", f"Ready to chat with {user.name}", gr.update(visible=True)
+            return (
+                f"Connected: {user.name} ({user.device_type}) - Click 'Load Data' to begin", 
+                gr.update(visible=True)
+            )
 
         except Exception as e:
-            gr.Error(f"❌ Connection failed: {str(e)}")
-            return "", "", gr.update(visible=False)
+            logger.error(f"User selection failed: {str(e)}")
+            return f"❌ Connection failed: {str(e)}", gr.update(visible=False)
 
-    def load_glucose_data(self) -> Tuple[str, str, go.Figure]:
-        """Load glucose data for the current user"""
-        if not self.current_user:
-            gr.Warning("Please select a demo user first")
-            return "Please select a demo user first", "", None
+    def load_glucose_data(self) -> Tuple[str, go.Figure]:
+        """Load and display glucose data using unified manager"""
+        if not self.data_manager.current_user:
+            return "Please select a demo user first", None
 
         try:
+            # Force reload data to ensure freshness
+            load_result = self.data_manager.load_user_data(
+                self._get_current_user_key(), 
+                force_reload=True
+            )
+            
+            if not load_result['success']:
+                return load_result['message'], None
+            
+            # Get unified stats
+            stats = self.data_manager.get_stats_for_ui()
+            chart_data = self.data_manager.get_chart_data()
+            
+            # Sync chat with fresh data
+            self._sync_chat_with_data_manager()
+            
+            if chart_data is None or chart_data.empty:
+                return "No glucose data available", None
+
+            # Build data summary with CONSISTENT metrics
+            user = self.data_manager.current_user
+            data_points = stats.get('total_readings', 0)
+            avg_glucose = stats.get('average_glucose', 0)
+            std_glucose = stats.get('std_glucose', 0)
+            min_glucose = stats.get('min_glucose', 0)
+            max_glucose = stats.get('max_glucose', 0)
+            
+            time_in_range = stats.get('time_in_range_70_180', 0)
+            time_below_range = stats.get('time_below_70', 0)
+            time_above_range = stats.get('time_above_180', 0)
+            
+            gmi = stats.get('gmi', 0)
+            cv = stats.get('cv', 0)
+            
+            # Calculate date range
             end_date = datetime.now()
             start_date = end_date - timedelta(days=14)
 
-            egv_data = self.dexcom_api.get_egv_data(
-                start_date.isoformat(),
-                end_date.isoformat()
-            )
-
-            if not egv_data:
-                egv_data = self._generate_demo_glucose_data()
-
-            self.glucose_data = self.analyzer.process_egv_data(egv_data)
-
-            if self.glucose_data.empty:
-                gr.Warning("No glucose data available")
-                return "No glucose data available", "", None
-
-            avg_glucose = self.glucose_data['value'].mean()
-            std_glucose = self.glucose_data['value'].std()
-            min_glucose = self.glucose_data['value'].min()
-            max_glucose = self.glucose_data['value'].max()
-            readings_count = len(self.glucose_data)
-
-            in_range = ((self.glucose_data['value'] >= 70) & (self.glucose_data['value'] <= 180)).sum()
-            below_range = (self.glucose_data['value'] < 70).sum()
-            above_range = (self.glucose_data['value'] > 180).sum()
-
-            time_in_range = (in_range / readings_count) * 100
-            time_below_range = (below_range / readings_count) * 100
-            time_above_range = (above_range / readings_count) * 100
-
-            gmi = 3.31 + (0.02392 * avg_glucose)
-            cv = (std_glucose / avg_glucose) * 100
-
             data_summary = f"""
-## 📊 Data Summary for {self.current_user.name}
+## 📊 Data Summary for {user.name}
 
 ### Basic Information
 • **Analysis Period:** {start_date.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')} (14 days)
-• **Total Readings:** {readings_count:,} glucose measurements
-• **Device:** {self.current_user.device_type}
+• **Total Readings:** {data_points:,} glucose measurements
+• **Device:** {user.device_type}
+• **Data Source:** {stats.get('data_source', 'unknown').upper()}
 
 ### Glucose Statistics
 • **Average Glucose:** {avg_glucose:.1f} mg/dL
 • **Standard Deviation:** {std_glucose:.1f} mg/dL
 • **Coefficient of Variation:** {cv:.1f}%
-• **Glucose Range:** {min_glucose} - {max_glucose} mg/dL
+• **Glucose Range:** {min_glucose:.0f} - {max_glucose:.0f} mg/dL
 • **GMI (Glucose Management Indicator):** {gmi:.1f}%
 
 ### Time in Range Analysis
@@ -138,71 +148,122 @@ class GlucoBuddyApp:
 • **Target Time in Range:** >70% (Current: {time_in_range:.1f}%)
 • **Target Time Below Range:** <4% (Current: {time_below_range:.1f}%)
 • **Target CV:** <36% (Current: {cv:.1f}%)
+
+### Data Validation
+• **In Range Count:** {stats.get('in_range_count', 0)} readings
+• **Below Range Count:** {stats.get('below_range_count', 0)} readings
+• **Above Range Count:** {stats.get('above_range_count', 0)} readings
+• **Total Verified:** {stats.get('in_range_count', 0) + stats.get('below_range_count', 0) + stats.get('above_range_count', 0)} readings
+
+### 14-Day Analysis Benefits
+• **Enhanced Pattern Recognition:** Captures full weekly cycles and variations
+• **Improved Trend Analysis:** Identifies consistent patterns vs. one-time events
+• **Better Clinical Insights:** More reliable data for healthcare decisions
+• **AI Consistency:** Same data used for chat analysis and UI display
             """
 
             chart = self.create_glucose_chart()
-
-            gr.Info("✅ Data loaded successfully!")
-            return data_summary, "✅ Data loaded - ready for chat", chart
+            
+            return data_summary, chart
 
         except Exception as e:
-            gr.Error(f"Failed to load glucose data: {str(e)}")
-            return f"Failed to load glucose data: {str(e)}", "", None
+            logger.error(f"Failed to load glucose data: {str(e)}")
+            return f"Failed to load glucose data: {str(e)}", None
+
+    def _sync_chat_with_data_manager(self):
+        """Ensure chat uses the same data as the UI"""
+        try:
+            # Get context from unified data manager
+            context = self.data_manager.get_context_for_agent()
+            
+            # Update chat's internal data to match
+            if not context.get("error"):
+                self.mistral_chat.current_user = self.data_manager.current_user
+                self.mistral_chat.current_glucose_data = self.data_manager.processed_glucose_data
+                self.mistral_chat.current_stats = self.data_manager.calculated_stats
+                self.mistral_chat.current_patterns = self.data_manager.identified_patterns
+                
+                logger.info(f"Synced chat with data manager - TIR: {self.data_manager.calculated_stats.get('time_in_range_70_180', 0):.1f}%")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync chat with data manager: {e}")
+
+    def _get_current_user_key(self) -> str:
+        """Get the current user key"""
+        if not self.data_manager.current_user:
+            return ""
+        
+        # Find the key for current user
+        for key, user in DEMO_USERS.items():
+            if user == self.data_manager.current_user:
+                return key
+        return ""
 
     def get_template_prompts(self) -> List[str]:
-        """Get template prompts based on user data"""
-        if not self.current_user:
+        """Get template prompts based on current user data"""
+        if not self.data_manager.current_user or not self.data_manager.calculated_stats:
             return [
                 "What should I know about managing my diabetes?",
                 "How can I improve my glucose control?"
             ]
 
-        if self.mcp_client.current_stats:
-            stats = self.mcp_client.current_stats
-            time_in_range = stats.get('time_in_range_70_180', 0)
-            time_below_70 = stats.get('time_below_70', 0)
+        stats = self.data_manager.calculated_stats
+        time_in_range = stats.get('time_in_range_70_180', 0)
+        time_below_70 = stats.get('time_below_70', 0)
 
-            templates = []
+        templates = []
 
-            if time_in_range < 70:
-                templates.append("My time in range is below target. What specific strategies can help me improve it?")
-            else:
-                templates.append("My time in range looks good. How can I maintain this level of control?")
+        if time_in_range < 70:
+            templates.append(f"My time in range is {time_in_range:.1f}% which is below the 70% target. What specific strategies can help me improve it?")
+        else:
+            templates.append(f"My time in range is {time_in_range:.1f}% which meets the target. How can I maintain this level of control?")
 
-            if time_below_70 > 4:
-                templates.append("I'm experiencing frequent low glucose episodes. What can I do to prevent them?")
-            else:
-                templates.append("What are the best practices for preventing hypoglycemia in my situation?")
+        if time_below_70 > 4:
+            templates.append(f"I'm experiencing {time_below_70:.1f}% time below 70 mg/dL. What can I do to prevent these low episodes?")
+        else:
+            templates.append("What are the best practices for preventing hypoglycemia in my situation?")
 
-            return templates
-        
-        return [
-            "Can you analyze my recent glucose patterns?",
-            "What can I do to improve my diabetes management?"
-        ]
+        return templates
 
     def chat_with_mistral(self, message: str, history: List) -> Tuple[str, List]:
-        """Handle chat interaction with Mistral MCP"""
+        """Handle chat interaction with Mistral using unified data"""
         if not message.strip():
             return "", history
 
-        if not self.current_user:
+        if not self.data_manager.current_user:
             response = "Please select a demo user first to get personalized insights about glucose data."
             history.append([message, response])
             return "", history
 
         try:
-            # Use asyncio to handle the async MCP client
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            response = loop.run_until_complete(self.mcp_client.send_message(message))
-            loop.close()
+            # Ensure chat is synced with latest data
+            self._sync_chat_with_data_manager()
+            
+            # Send message to Mistral chat
+            result = self.mistral_chat.chat_with_mistral(message)
+            
+            if result['success']:
+                response = result['response']
+                
+                # Add data consistency note
+                validation = self.data_manager.validate_data_consistency()
+                if validation.get('valid'):
+                    data_age = validation.get('data_age_minutes', 0)
+                    if data_age > 10:  # Warn if data is old
+                        response += f"\n\n📊 *Note: Analysis based on data from {data_age} minutes ago. Reload data for most current insights.*"
+                
+                # Add context note if no user data was included
+                if not result.get('context_included', True):
+                    response += "\n\n💡 *For more personalized advice, make sure your glucose data is loaded.*"
+            else:
+                response = f"I apologize, but I encountered an error: {result.get('error', 'Unknown error')}. Please try again or rephrase your question."
 
             history.append([message, response])
             return "", history
 
         except Exception as e:
-            error_response = f"I apologize, but I encountered an error while processing your question: {str(e)}. Please try rephrasing your question or contact support if the issue persists."
+            logger.error(f"Chat error: {str(e)}")
+            error_response = f"I apologize, but I encountered an error while processing your question: {str(e)}. Please try rephrasing your question."
             history.append([message, error_response])
             return "", history
 
@@ -210,25 +271,34 @@ class GlucoBuddyApp:
         """Use a template prompt in the chat"""
         return template_text
 
+    def clear_chat_history(self) -> List:
+        """Clear chat history"""
+        self.chat_history = []
+        self.mistral_chat.clear_conversation()
+        return []
+
     def create_glucose_chart(self) -> Optional[go.Figure]:
-        """Create an interactive glucose chart"""
-        if self.glucose_data is None or self.glucose_data.empty:
+        """Create an interactive glucose chart using unified data"""
+        chart_data = self.data_manager.get_chart_data()
+        
+        if chart_data is None or chart_data.empty:
             return None
 
         fig = go.Figure()
 
+        # Color code based on glucose ranges
         colors = []
-        for value in self.glucose_data['value']:
+        for value in chart_data['value']:
             if value < 70:
-                colors.append('#E74C3C')
+                colors.append('#E74C3C')  # Red for low
             elif value > 180:
-                colors.append('#F39C12')
+                colors.append('#F39C12')  # Orange for high
             else:
-                colors.append('#27AE60')
+                colors.append('#27AE60')  # Green for in range
 
         fig.add_trace(go.Scatter(
-            x=self.glucose_data['systemTime'],
-            y=self.glucose_data['value'],
+            x=chart_data['systemTime'],
+            y=chart_data['value'],
             mode='lines+markers',
             name='Glucose',
             line=dict(color='#2E86AB', width=2),
@@ -236,6 +306,7 @@ class GlucoBuddyApp:
             hovertemplate='<b>%{y} mg/dL</b><br>%{x}<extra></extra>'
         ))
 
+        # Add target range shading
         fig.add_hrect(
             y0=70, y1=180,
             fillcolor="rgba(39, 174, 96, 0.1)",
@@ -245,6 +316,7 @@ class GlucoBuddyApp:
             annotation_position="top left"
         )
 
+        # Add reference lines
         fig.add_hline(y=70, line_dash="dash", line_color="#E67E22",
                      annotation_text="Low (70 mg/dL)", annotation_position="right")
         fig.add_hline(y=180, line_dash="dash", line_color="#E67E22",
@@ -254,9 +326,13 @@ class GlucoBuddyApp:
         fig.add_hline(y=250, line_dash="dot", line_color="#E74C3C",
                      annotation_text="Severe High (250 mg/dL)", annotation_position="right")
 
+        # Get current stats for title
+        stats = self.data_manager.get_stats_for_ui()
+        tir = stats.get('time_in_range_70_180', 0)
+        
         fig.update_layout(
             title={
-                'text': f"Glucose Trends - {self.current_user.name if self.current_user else 'Demo User'}",
+                'text': f"14-Day Glucose Trends - {self.data_manager.current_user.name} (TIR: {tir:.1f}%)",
                 'x': 0.5,
                 'xanchor': 'center'
             },
@@ -276,49 +352,9 @@ class GlucoBuddyApp:
 
         return fig
 
-    def _generate_demo_glucose_data(self) -> list:
-        """Generate realistic demo glucose data"""
-        import random
-        import numpy as np
-
-        demo_data = []
-        base_time = datetime.now() - timedelta(days=14)
-
-        for i in range(288 * 14):
-            timestamp = base_time + timedelta(minutes=i * 5)
-
-            hour = timestamp.hour
-
-            base_glucose = 120 + 20 * np.sin((hour - 6) * np.pi / 12)
-
-            if hour in [7, 12, 18]:
-                base_glucose += random.randint(20, 60)
-
-            glucose = base_glucose + random.randint(-15, 15)
-            glucose = max(50, min(300, glucose))
-
-            trend = "flat"
-            if i > 0:
-                prev_glucose = demo_data[-1]["value"]
-                diff = glucose - prev_glucose
-                if diff > 5:
-                    trend = "singleUp"
-                elif diff < -5:
-                    trend = "singleDown"
-
-            demo_data.append({
-                "systemTime": timestamp.isoformat(),
-                "displayTime": timestamp.isoformat(),
-                "value": int(glucose),
-                "trend": trend,
-                "status": "ok"
-            })
-
-        return demo_data
-
 
 def create_interface():
-    """Create the Gradio interface"""
+    """Create the Gradio interface with prominent, centralized load data button"""
     app = GlucoBuddyApp()
 
     custom_css = """
@@ -330,6 +366,51 @@ def create_interface():
         border-radius: 10px;
         margin-bottom: 2rem;
     }
+    .load-data-section {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        border-radius: 15px;
+        padding: 2rem;
+        margin: 1.5rem 0;
+        box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .prominent-button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        border: none !important;
+        border-radius: 15px !important;
+        padding: 1.5rem 3rem !important;
+        font-size: 1.2rem !important;
+        font-weight: bold !important;
+        color: white !important;
+        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.4) !important;
+        transition: all 0.3s ease !important;
+        min-height: 80px !important;
+        text-align: center !important;
+    }
+    .prominent-button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 12px 40px rgba(102, 126, 234, 0.6) !important;
+    }
+    .data-status-card {
+        background: #f8f9fa;
+        border: 2px solid #e9ecef;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        text-align: center;
+        font-weight: 500;
+    }
+    .data-status-success {
+        border-color: #28a745;
+        background: #d4edda;
+        color: #155724;
+    }
+    .data-status-error {
+        border-color: #dc3545;
+        background: #f8d7da;
+        color: #721c24;
+    }
     .user-card {
         background: #f8f9fa;
         border: 1px solid #dee2e6;
@@ -337,22 +418,21 @@ def create_interface():
         padding: 1rem;
         margin: 0.5rem;
     }
-    .status-success {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .status-warning {
-        color: #ffc107;
-        font-weight: bold;
-    }
-    .status-error {
-        color: #dc3545;
-        font-weight: bold;
-    }
     .template-button {
         margin: 0.25rem;
         padding: 0.5rem;
         font-size: 0.9rem;
+    }
+    .chat-container {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 1rem;
+    }
+    .section-divider {
+        height: 2px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 1px;
+        margin: 2rem 0;
     }
     """
 
@@ -362,6 +442,7 @@ def create_interface():
         css=custom_css
     ) as interface:
 
+        # Header
         with gr.Row():
             with gr.Column():
                 gr.HTML("""
@@ -381,6 +462,7 @@ def create_interface():
                 </div>
                 """)
 
+        # User Selection Section
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### 👥 Select Demo User")
@@ -408,6 +490,7 @@ def create_interface():
                         size="lg"
                     )
 
+        # Connection Status
         with gr.Row():
             connection_status = gr.Textbox(
                 label="Current User",
@@ -416,152 +499,203 @@ def create_interface():
                 container=True
             )
 
-        with gr.Group(visible=False) as main_interface:
+        # Section Divider
+        gr.HTML('<div class="section-divider"></div>')
 
+        # PROMINENT CENTRALIZED DATA LOADING SECTION
+        with gr.Group(visible=False) as main_interface:
+            # PROMINENT LOAD BUTTON - Centered and Large
             with gr.Row():
-                with gr.Column(scale=3):
-                    data_status = gr.Textbox(
-                        label="Data Status",
-                        value="Ready to load data",
-                        interactive=False
-                    )
                 with gr.Column(scale=1):
+                    pass  # Left spacer
+                with gr.Column(scale=2):
                     load_data_btn = gr.Button(
-                        "📊 Load Glucose Data\n(Last 14 Days)",
-                        variant="primary",
+                        "🚀 LOAD 14-DAY GLUCOSE DATA\n📈 Start Analysis & Enable AI Chat",
+                        elem_classes=["prominent-button"],
                         size="lg"
                     )
+                with gr.Column(scale=1):
+                    pass  # Right spacer
 
+            # Section Divider
+            gr.HTML('<div class="section-divider"></div>')
+
+            # Main Content Tabs
             with gr.Tabs():
 
+                # Glucose Chart Tab
                 with gr.TabItem("📈 Glucose Chart"):
-                    glucose_chart = gr.Plot(
-                        label="Interactive Glucose Trends",
-                        container=True
-                    )
+                    with gr.Column():
+                        gr.Markdown("### 📊 Interactive 14-Day Glucose Analysis")
+                        gr.Markdown("*Load your data using the button above to see your comprehensive glucose trends*")
+                        
+                        glucose_chart = gr.Plot(
+                            label="Interactive 14-Day Glucose Trends",
+                            container=True
+                        )
 
+                # Chat Tab
                 with gr.TabItem("💬 Chat with AI"):
-                    gr.Markdown("### Chat with GlycoAI about your glucose data")
+                    with gr.Column(elem_classes=["chat-container"]):
+                        gr.Markdown("### 🤖 Chat with GlycoAI about your glucose data")
+                        gr.Markdown("*📊 Load your data using the button above to enable personalized AI insights*")
+                        
+                        # Template Prompts
+                        with gr.Row():
+                            with gr.Column():
+                                gr.Markdown("**💡 Quick Start Templates:**")
+                                with gr.Row():
+                                    template1_btn = gr.Button(
+                                        "🎯 Analyze My 14-Day Patterns",
+                                        variant="secondary",
+                                        size="sm",
+                                        elem_classes=["template-button"]
+                                    )
+                                    template2_btn = gr.Button(
+                                        "⚡ Improve My Control",
+                                        variant="secondary",
+                                        size="sm",
+                                        elem_classes=["template-button"]
+                                    )
+                                    template3_btn = gr.Button(
+                                        "🍽️ Meal Management Tips",
+                                        variant="secondary",
+                                        size="sm",
+                                        elem_classes=["template-button"]
+                                    )
 
-                    with gr.Row():
-                        with gr.Column():
-                            gr.Markdown("**💡 Quick Start Templates:**")
-                            with gr.Row():
-                                template1_btn = gr.Button(
-                                    "🎯 Time in Range Help",
-                                    variant="secondary",
-                                    size="sm"
-                                )
-                                template2_btn = gr.Button(
-                                    "⚡ Prevent Low Glucose",
-                                    variant="secondary",
-                                    size="sm"
-                                )
-
-                    chatbot = gr.Chatbot(
-                        label="💬 Chat with GlycoAI",
-                        height=500,
-                        show_label=True,
-                        container=True,
-                        bubble_full_width=False
-                    )
-
-                    with gr.Row():
-                        chat_input = gr.Textbox(
-                            placeholder="Ask me about your glucose patterns, trends, or management strategies...",
-                            label="Your Question",
-                            lines=2,
-                            scale=4
-                        )
-                        send_btn = gr.Button(
-                            "Send 💬",
-                            variant="primary",
-                            scale=1
-                        )
-
-                    with gr.Row():
-                        clear_chat_btn = gr.Button(
-                            "🗑️ Clear Chat",
-                            variant="secondary",
-                            size="sm"
+                        # Chat Interface
+                        chatbot = gr.Chatbot(
+                            label="💬 Chat with GlycoAI (Unified Data)",
+                            height=500,
+                            show_label=True,
+                            container=True,
+                            bubble_full_width=False,
+                            avatar_images=(None, "🩺")
                         )
 
+                        # Chat Input
+                        with gr.Row():
+                            chat_input = gr.Textbox(
+                                placeholder="Ask me about your glucose patterns, trends, or management strategies...",
+                                label="Your Question",
+                                lines=2,
+                                scale=4
+                            )
+                            send_btn = gr.Button(
+                                "Send 💬",
+                                variant="primary",
+                                scale=1
+                            )
+
+                        # Chat Controls
+                        with gr.Row():
+                            clear_chat_btn = gr.Button(
+                                "🗑️ Clear Chat",
+                                variant="secondary",
+                                size="sm"
+                            )
+                            gr.Markdown("*AI responses are for informational purposes only. Always consult your healthcare provider.*")
+
+                # Data Overview Tab
                 with gr.TabItem("📋 Data Overview"):
-                    data_display = gr.Markdown("Load data to see overview", container=True)
+                    with gr.Column():
+                        gr.Markdown("### 📋 Comprehensive Data Analysis")
+                        gr.Markdown("*Load your data using the button above to see detailed glucose statistics*")
+                        
+                        data_display = gr.Markdown("Click 'Load 14-Day Glucose Data' above to see your comprehensive analysis", container=True)
 
-        # Event handler functions
+        # Event Handlers
         def handle_user_selection(user_key):
-            status, data_status, interface_visibility = app.select_demo_user(user_key)
-            return status, data_status, interface_visibility, []
+            status, interface_visibility = app.select_demo_user(user_key)
+            return status, interface_visibility, []
 
-        def use_template_1():
-            templates = app.get_template_prompts()
-            return templates[0] if templates else "My time in range needs improvement. What specific strategies can help?"
+        def handle_load_data():
+            overview, status_overview, chart, status_chart = app.load_glucose_data()
+            return overview, chart
 
-        def use_template_2():
+        def get_template_prompt(template_type):
             templates = app.get_template_prompts()
-            return templates[1] if len(templates) > 1 else "What are the best practices for preventing hypoglycemia?"
+            if template_type == 1:
+                return templates[0] if templates else "Can you analyze my recent glucose patterns and give me insights?"
+            elif template_type == 2:
+                return templates[1] if len(templates) > 1 else "What can I do to improve my diabetes management based on my data?"
+            else:
+                return "What are some meal management strategies for better glucose control?"
 
         def handle_chat_submit(message, history):
             return app.chat_with_mistral(message, history)
 
-        def clear_chat():
-            app.chat_history = []
-            return []
+        def handle_enter_key(message, history):
+            if message.strip():
+                return app.chat_with_mistral(message, history)
+            return "", history
 
-        # Event handlers
-        user_selection_outputs = [connection_status, data_status, main_interface, chatbot]
+        # Connect Event Handlers
+        user_selection_outputs = [connection_status, main_interface, chatbot]
 
         sarah_btn.click(
             lambda: handle_user_selection("sarah_g7"),
-            outputs=user_selection_outputs
+            outputs=[connection_status, main_interface, chatbot]
         )
 
         marcus_btn.click(
             lambda: handle_user_selection("marcus_one"),
-            outputs=user_selection_outputs
+            outputs=[connection_status, main_interface, chatbot]
         )
 
         jennifer_btn.click(
             lambda: handle_user_selection("jennifer_g6"),
-            outputs=user_selection_outputs
+            outputs=[connection_status, main_interface, chatbot]
         )
 
         robert_btn.click(
             lambda: handle_user_selection("robert_receiver"),
-            outputs=user_selection_outputs
+            outputs=[connection_status, main_interface, chatbot]
         )
 
+        # PROMINENT DATA LOADING - Single button updates all views
         load_data_btn.click(
-            app.load_glucose_data,
-            outputs=[data_display, data_status, glucose_chart]
+            handle_load_data,
+            outputs=[data_display, glucose_chart]
         )
 
-# Chat event handlers (completion from where it was cut off)
+        # Chat Handlers
         send_btn.click(
             handle_chat_submit,
             inputs=[chat_input, chatbot],
             outputs=[chat_input, chatbot]
         )
 
-        # Template button handlers
+        chat_input.submit(
+            handle_enter_key,
+            inputs=[chat_input, chatbot],
+            outputs=[chat_input, chatbot]
+        )
+
+        # Template Button Handlers
         template1_btn.click(
-            use_template_1,
+            lambda: get_template_prompt(1),
             outputs=[chat_input]
         )
 
         template2_btn.click(
-            use_template_2,
+            lambda: get_template_prompt(2),
             outputs=[chat_input]
         )
 
-        # Clear chat handler
+        template3_btn.click(
+            lambda: get_template_prompt(3),
+            outputs=[chat_input]
+        )
+
+        # Clear Chat
         clear_chat_btn.click(
-            clear_chat,
+            app.clear_chat_history,
             outputs=[chatbot]
         )
 
-        # Add footer information
+        # Footer
         with gr.Row():
             gr.HTML("""
             <div style="text-align: center; padding: 2rem; margin-top: 2rem; border-top: 1px solid #dee2e6; color: #6c757d;">
@@ -580,18 +714,30 @@ def create_interface():
 
 def main():
     """Main function to launch the application"""
-    print("🚀 Starting GlycoAI - AI-Powered Glucose Insights...")
+    print("🚀 Starting GlycoAI - AI-Powered Glucose Insights (Enhanced UI)...")
+    
+    # Validate environment before starting
+    print("🔍 Validating environment configuration...")
+    if not validate_environment():
+        print("❌ Environment validation failed!")
+        print("Please check your .env file or environment variables.")
+        return
+    
+    print("✅ Environment validation passed!")
     
     try:
         # Create and launch the interface
         demo = create_interface()
         
+        print("🎯 GlycoAI is starting with enhanced UI design...")
+        print("📊 Features: Prominent load button, unified data management, consistent metrics")
+        
         # Launch with custom settings
         demo.launch(
             server_name="0.0.0.0",  # Allow external access
             server_port=7860,       # Default Gradio port
-            share=False,            # Set to True for public sharing
-            debug=True,             # Enable debug mode
+            share=True,            # Set to True for public sharing (tunneling)
+            debug=os.getenv("DEBUG", "false").lower() == "true",
             show_error=True,        # Show errors in the interface
             auth=None,              # No authentication required
             favicon_path=None,      # Use default favicon
@@ -601,13 +747,27 @@ def main():
     except Exception as e:
         logger.error(f"Failed to launch GlycoAI application: {e}")
         print(f"❌ Error launching application: {e}")
+        
+        # Provide helpful error information
+        if "environment" in str(e).lower():
+            print("\n💡 Environment troubleshooting:")
+            print("1. Check if .env file exists with MISTRAL_API_KEY")
+            print("2. Verify your API key is valid")
+            print("3. For Hugging Face Spaces, check Repository secrets")
+        else:
+            print("\n💡 Try checking:")
+            print("1. All dependencies are installed: pip install -r requirements.txt")
+            print("2. Port 7860 is available")
+            print("3. Check the logs above for specific error details")
+        
         raise
 
 
 if __name__ == "__main__":
     # Setup logging configuration
+    log_level = os.getenv("LOG_LEVEL", "INFO")
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level.upper()),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler('glycoai.log'),
