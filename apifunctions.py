@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-GlucoBuddy MCP Server
-Implements Model Context Protocol server for glucose data analysis
+Dexcom Client for glucose data analysis
 """
 
 import json
