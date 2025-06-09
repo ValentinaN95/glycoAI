@@ -611,7 +611,7 @@ def create_interface():
             return status, interface_visibility, []
 
         def handle_load_data():
-            overview, status_overview, chart, status_chart = app.load_glucose_data()
+            overview, chart = app.load_glucose_data()
             return overview, chart
 
         def get_template_prompt(template_type):

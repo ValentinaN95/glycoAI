@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Dexcom Client for glucose data analysis
+Dexcom Client for glucose data analysis - RESTORED WORKING VERSION
+This restores the original working API code before unified data manager
 """
 
 import json
@@ -47,7 +48,7 @@ class DemoUser:
     years_with_diabetes: int = 5
     typical_glucose_pattern: str = "normal"
 
-# Demo users based on Dexcom Sandbox documentation
+# Demo users - EXACTLY as they were when it was working
 DEMO_USERS = {
     "sarah_g7": DemoUser(
         name="Sarah Thompson",
@@ -95,14 +96,14 @@ DEMO_USERS = {
     )
 }
 
-# Dexcom API Configuration
+# Dexcom API Configuration - ORIGINAL WORKING VERSION
 SANDBOX_BASE_URL = "https://sandbox-api.dexcom.com"
 CLIENT_ID = "mLElKHKRwRDVUrAOPBzktFGY7qkTc7Zm"
 CLIENT_SECRET = "HmFpgyVweuwKrQpf"
 REDIRECT_URI = "http://localhost:7860/callback"
 
 class DexcomAPI:
-    """Handles all Dexcom API interactions with proper OAuth flow"""
+    """Handles all Dexcom API interactions with proper OAuth flow - ORIGINAL WORKING VERSION"""
 
     def __init__(self):
         self.base_url = SANDBOX_BASE_URL
@@ -156,7 +157,7 @@ class DexcomAPI:
             raise Exception(f"Failed to exchange authorization code: {str(e)}")
 
     def simulate_demo_login(self, demo_user_key: str) -> str:
-        """Simulate OAuth flow for demo users using sandbox credentials"""
+        """Simulate OAuth flow for demo users using sandbox credentials - ORIGINAL WORKING VERSION"""
         if demo_user_key not in DEMO_USERS:
             raise ValueError(f"Invalid demo user: {demo_user_key}")
 
@@ -327,7 +328,7 @@ class DexcomAPI:
             }
 
     def get_egv_data(self, start_date: str = None, end_date: str = None) -> List[Dict]:
-        """Get Estimated Glucose Values (EGV) data"""
+        """Get Estimated Glucose Values (EGV) data - ORIGINAL WORKING VERSION"""
         self._ensure_valid_token()
 
         url = f"{self.base_url}/v2/users/self/egvs"
@@ -466,6 +467,7 @@ class GlucoseAnalyzer:
                 patterns.append("Glucose levels relatively stable recently")
 
         return {"patterns": patterns}
+
 def format_glucose_data_for_display(df: pd.DataFrame) -> str:
     """Format glucose data for display in the interface"""
     if df.empty:
@@ -494,4 +496,4 @@ def format_glucose_data_for_display(df: pd.DataFrame) -> str:
 
         formatted_data += f"| {time_str} | {glucose:.0f} | {trend_arrow} |\n"
 
-    return formatted_data    
+    return formatted_data

@@ -1,6 +1,6 @@
 """
-Unified Data Manager for GlycoAI
-Ensures consistent data and metrics between UI and AI agent
+Unified Data Manager for GlycoAI - FIXED VERSION
+Restores the original working API calls that were working before
 """
 
 import logging
@@ -20,18 +20,14 @@ logger = logging.getLogger(__name__)
 
 class UnifiedDataManager:
     """
-    Centralized data manager that ensures both the UI and AI agent 
-    use exactly the same glucose data and calculations
+    FIXED: Unified data manager that calls the API exactly as it was working before
     """
     
     def __init__(self):
         self.dexcom_api = DexcomAPI()
         self.analyzer = GlucoseAnalyzer()
         
-        # Log Dexcom configuration for debugging
-        logger.info(f"UnifiedDataManager initialized")
-        logger.info(f"Dexcom base URL: {getattr(self.dexcom_api, 'base_url', 'Not set')}")
-        logger.info(f"Dexcom client configured: {hasattr(self.dexcom_api, 'access_token')}")
+        logger.info(f"UnifiedDataManager initialized - RESTORED to working version")
         
         # Single source of truth for all data
         self.current_user: Optional[DemoUser] = None
@@ -46,14 +42,7 @@ class UnifiedDataManager:
         
     def load_user_data(self, user_key: str, force_reload: bool = False) -> Dict[str, Any]:
         """
-        Load glucose data for a user and ensure all components use the same data
-        
-        Args:
-            user_key: The demo user key
-            force_reload: Whether to force reload even if data already exists
-            
-        Returns:
-            Dict with success status and data summary
+        FIXED: Load glucose data using the ORIGINAL WORKING method
         """
         
         # Check if we already have data for this user and it's recent
@@ -73,34 +62,39 @@ class UnifiedDataManager:
                     "message": f"❌ Invalid user key '{user_key}'. Available: {', '.join(DEMO_USERS.keys())}"
                 }
             
-            logger.info(f"Loading fresh data for user: {user_key}")
+            logger.info(f"Loading data for user: {user_key}")
             
             # Set current user
             self.current_user = DEMO_USERS[user_key]
             
-            # Try to get real data from Dexcom API first
+            # Call API EXACTLY as it was working before
             try:
                 logger.info(f"Attempting Dexcom API authentication for {user_key}")
                 
-                # Properly authenticate with Dexcom sandbox
+                # ORIGINAL WORKING METHOD: Use the simulate_demo_login exactly as before
                 access_token = self.dexcom_api.simulate_demo_login(user_key)
                 logger.info(f"Dexcom authentication result: {bool(access_token)}")
                 
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=14)
-                
-                # Attempt to get EGV data with proper date range
-                self.raw_glucose_data = self.dexcom_api.get_egv_data(
-                    start_date.isoformat(),
-                    end_date.isoformat()
-                )
-                
-                if self.raw_glucose_data and len(self.raw_glucose_data) > 0:
-                    self.data_source = "dexcom_api"
-                    logger.info(f"✅ Successfully loaded {len(self.raw_glucose_data)} readings from Dexcom API")
+                if access_token:
+                    # ORIGINAL WORKING METHOD: Get data with 14-day range
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=14)
+                    
+                    # Call get_egv_data EXACTLY as it was working before
+                    self.raw_glucose_data = self.dexcom_api.get_egv_data(
+                        start_date.isoformat(),
+                        end_date.isoformat()
+                    )
+                    
+                    if self.raw_glucose_data and len(self.raw_glucose_data) > 0:
+                        self.data_source = "dexcom_api"
+                        logger.info(f"✅ Successfully loaded {len(self.raw_glucose_data)} readings from Dexcom API")
+                    else:
+                        logger.warning("Dexcom API returned empty data - falling back to mock data")
+                        raise Exception("Empty data from Dexcom API")
                 else:
-                    logger.warning("Dexcom API returned empty data - falling back to mock data")
-                    raise Exception("Empty data from Dexcom API")
+                    logger.warning("Failed to get access token - falling back to mock data")
+                    raise Exception("Authentication failed")
                     
             except Exception as api_error:
                 logger.warning(f"Dexcom API failed ({str(api_error)}) - using mock data fallback")
@@ -365,3 +359,55 @@ class UnifiedDataManager:
         logger.info(f"Data consistency check: {validation}")
         
         return validation
+
+# ADDITIONAL: Debug function to test the API connection as it was working before
+def test_original_api_method():
+    """Test the API exactly as it was working before unified data manager"""
+    from apifunctions import DexcomAPI, DEMO_USERS
+    
+    print("🔍 Testing API exactly as it was working before...")
+    
+    api = DexcomAPI()
+    
+    # Test with sarah_g7 as it was working before
+    user_key = "sarah_g7"
+    user = DEMO_USERS[user_key]
+    
+    print(f"Testing with {user.name} ({user.username})")
+    
+    try:
+        # Call simulate_demo_login exactly as before
+        access_token = api.simulate_demo_login(user_key)
+        print(f"✅ Authentication: {bool(access_token)}")
+        
+        if access_token:
+            # Call get_egv_data exactly as before
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=14)
+            
+            egv_data = api.get_egv_data(
+                start_date.isoformat(),
+                end_date.isoformat()
+            )
+            
+            print(f"✅ EGV Data: {len(egv_data)} readings")
+            
+            if egv_data:
+                print(f"✅ SUCCESS! API is working as before")
+                sample = egv_data[0] if egv_data else {}
+                print(f"Sample reading: {sample}")
+                return True
+            else:
+                print("⚠️  API authenticated but returned no data")
+                return False
+        else:
+            print("❌ Authentication failed")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+if __name__ == "__main__":
+    # Test the original API method
+    test_original_api_method()
